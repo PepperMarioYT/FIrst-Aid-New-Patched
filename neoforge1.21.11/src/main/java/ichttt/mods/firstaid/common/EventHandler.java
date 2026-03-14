@@ -1,0 +1,573 @@
+/*
+ * FirstAid
+ * Copyright (C) 2017-2024
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+package ichttt.mods.firstaid.common;
+
+import ichttt.mods.firstaid.FirstAid;
+import ichttt.mods.firstaid.FirstAidConfig;
+import ichttt.mods.firstaid.api.damagesystem.AbstractPlayerDamageModel;
+import ichttt.mods.firstaid.api.damagesystem.AbstractPartHealer;
+import ichttt.mods.firstaid.api.distribution.IDamageDistributionAlgorithm;
+import ichttt.mods.firstaid.api.enums.EnumPlayerPart;
+import ichttt.mods.firstaid.api.healing.ItemHealing;
+import ichttt.mods.firstaid.common.damagesystem.PlayerDamageModel;
+import ichttt.mods.firstaid.common.damagesystem.distribution.DamageDistribution;
+import ichttt.mods.firstaid.common.damagesystem.distribution.HealthDistribution;
+import ichttt.mods.firstaid.common.damagesystem.distribution.RandomDamageDistributionAlgorithm;
+import ichttt.mods.firstaid.common.damagesystem.distribution.StandardDamageDistributionAlgorithm;
+import ichttt.mods.firstaid.common.init.FirstAidDataAttachments;
+import ichttt.mods.firstaid.common.registries.FirstAidRegistryLookups;
+import ichttt.mods.firstaid.common.util.CommonUtils;
+import ichttt.mods.firstaid.common.util.PlayerSizeHelper;
+import net.minecraft.ChatFormatting;
+import net.minecraft.core.registries.Registries;
+import net.minecraft.resources.Identifier;
+import net.minecraft.resources.ResourceKey;
+import net.minecraft.network.chat.Component;
+import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.server.permissions.Permissions;
+import net.minecraft.tags.DamageTypeTags;
+import net.minecraft.world.damagesource.DamageSource;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.EntityDimensions;
+import net.minecraft.world.entity.EquipmentSlot;
+import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.Mob;
+import net.minecraft.world.entity.ai.Brain;
+import net.minecraft.world.entity.ai.memory.MemoryModuleType;
+import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.entity.projectile.Projectile;
+import net.minecraft.world.entity.projectile.arrow.AbstractArrow;
+import net.minecraft.world.entity.projectile.throwableitemprojectile.AbstractThrownPotion;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.InteractionResult;
+import net.minecraft.world.food.FoodData;
+import net.minecraft.sounds.SoundEvents;
+import net.minecraft.world.item.crafting.Recipe;
+import net.minecraft.world.item.crafting.RecipeHolder;
+import net.minecraft.world.level.LevelAccessor;
+import net.minecraft.world.level.ClipContext;
+import net.minecraft.world.level.gamerules.GameRules;
+import net.minecraft.world.level.storage.loot.BuiltInLootTables;
+import net.minecraft.world.level.storage.loot.LootPool;
+import net.minecraft.world.level.storage.loot.entries.LootItem;
+import net.minecraft.world.level.storage.loot.functions.SetItemCountFunction;
+import net.minecraft.world.level.storage.loot.providers.number.ConstantValue;
+import net.minecraft.world.level.storage.loot.providers.number.NumberProvider;
+import net.minecraft.world.level.storage.loot.providers.number.UniformGenerator;
+import net.minecraft.world.phys.AABB;
+import net.minecraft.world.phys.BlockHitResult;
+import net.minecraft.world.phys.EntityHitResult;
+import net.minecraft.world.phys.HitResult;
+import net.minecraft.world.phys.Vec3;
+import net.neoforged.neoforge.event.LootTableLoadEvent;
+import net.neoforged.neoforge.event.RegisterCommandsEvent;
+import net.neoforged.neoforge.event.TagsUpdatedEvent;
+import net.neoforged.neoforge.event.entity.ProjectileImpactEvent;
+import net.neoforged.neoforge.event.entity.EntityEvent;
+import net.neoforged.neoforge.event.entity.living.LivingHealEvent;
+import net.neoforged.neoforge.event.entity.living.LivingChangeTargetEvent;
+import net.neoforged.neoforge.event.entity.living.LivingIncomingDamageEvent;
+import net.neoforged.neoforge.event.entity.player.AttackEntityEvent;
+import net.neoforged.neoforge.event.entity.player.PlayerEvent;
+import net.neoforged.neoforge.event.entity.player.PlayerInteractEvent;
+import net.neoforged.neoforge.event.level.LevelEvent;
+import net.neoforged.neoforge.event.level.SleepFinishedTimeEvent;
+import net.neoforged.neoforge.event.server.ServerStoppedEvent;
+import net.neoforged.neoforge.event.tick.PlayerTickEvent;
+import net.neoforged.bus.api.EventPriority;
+import net.neoforged.bus.api.ICancellableEvent;
+import net.neoforged.bus.api.SubscribeEvent;
+import net.neoforged.fml.ModList;
+import net.minecraft.util.Mth;
+import org.apache.commons.lang3.tuple.Pair;
+
+import java.util.*;
+
+public class EventHandler {
+    public static final Random RAND = new Random();
+    private static final EntityDimensions PLAYER_UNCONSCIOUS_DIMENSIONS = EntityDimensions.scalable(1.4F, 0.4F);
+    private static final List<ResourceKey<Recipe<?>>> STARTER_RECIPES = List.of(
+            recipeKey("bandage"),
+            recipeKey("plaster"),
+            recipeKey("morphine"),
+            recipeKey("painkillers")
+    );
+
+    public static final Map<Player, Pair<Entity, HitResult>> hitList = new WeakHashMap<>();
+
+    private static ResourceKey<Recipe<?>> recipeKey(String path) {
+        return ResourceKey.create(Registries.RECIPE, Identifier.fromNamespaceAndPath(FirstAid.MODID, path));
+    }
+
+    private static void awardStarterRecipes(ServerPlayer player) {
+        List<RecipeHolder<?>> recipes = STARTER_RECIPES.stream()
+                .map(Objects.requireNonNull(player.level().getServer()).getRecipeManager()::byKey)
+                .flatMap(Optional::stream)
+                .toList();
+        if (!recipes.isEmpty()) {
+            player.awardRecipes(recipes);
+        }
+    }
+
+    @SubscribeEvent(priority = EventPriority.LOWEST) //so all other can modify their damage first, and we apply after that
+    public static void onLivingHurt(LivingIncomingDamageEvent event) {
+        LivingEntity entity = event.getEntity();
+        if (entity.level().isClientSide() || !CommonUtils.hasDamageModel(entity))
+            return;
+        float amountToDamage = event.getAmount();
+        Player player = (Player) entity;
+        AbstractPlayerDamageModel damageModel = CommonUtils.getDamageModel(player);
+        if (damageModel == null) return;
+        DamageSource source = event.getSource();
+
+        if (amountToDamage == Float.MAX_VALUE || Float.isNaN(amountToDamage) || amountToDamage == Float.POSITIVE_INFINITY) {
+            damageModel.forEach(damageablePart -> damageablePart.currentHealth = 0F);
+            if (player instanceof ServerPlayer serverPlayer)
+                serverPlayer.syncData(FirstAidDataAttachments.DAMAGE_MODEL.get());
+            event.setCanceled(true);
+            CommonUtils.killPlayer(damageModel, player, source);
+            return;
+        }
+
+        boolean addStat = amountToDamage < 3.4028235E37F;
+        IDamageDistributionAlgorithm damageDistribution = FirstAidRegistryLookups.getDamageDistributions(source.type());
+
+        if (source.is(DamageTypeTags.IS_PROJECTILE)) {
+            Entity directEntity = source.getDirectEntity();
+            if (directEntity instanceof AbstractArrow arrow && arrow.getPierceLevel() == 0) {
+                arrow.discard();
+            }
+            Pair<Entity, HitResult> rayTraceResult = hitList.remove(player);
+            if (rayTraceResult != null) {
+                Entity entityProjectile = rayTraceResult.getLeft();
+                EquipmentSlot slot = PlayerSizeHelper.getSlotTypeForProjectileHit(entityProjectile, player);
+                if (slot != null) {
+                    List<EnumPlayerPart> possibleParts = CommonUtils.getPartListForSlot(slot);
+                    damageDistribution = new StandardDamageDistributionAlgorithm(Collections.singletonMap(slot, possibleParts), false, true);
+                }
+            }
+        }
+        if (damageDistribution == null) {
+            // No given distribution found, and no projectile distribution either. Let's check if we can tell by the source where we should apply the damage, otherwise fall back to random
+            damageDistribution = PlayerSizeHelper.getMeleeDistribution(player, source);
+            if (damageDistribution == null) {
+                damageDistribution = RandomDamageDistributionAlgorithm.getDefault();
+            }
+        }
+
+        DamageDistribution.handleDamageTaken(damageDistribution, damageModel, amountToDamage, player, source, addStat, true);
+        if (amountToDamage > 0.0F && player.isAlive()) {
+            float pitch = 0.9F + (player.level().random.nextFloat() * 0.2F);
+            player.level().playSound(null, player.getX(), player.getY(), player.getZ(), SoundEvents.PLAYER_HURT, player.getSoundSource(), 1.0F, pitch);
+        }
+
+        event.setCanceled(true);
+
+        hitList.remove(player);
+    }
+
+    @SubscribeEvent(priority =  EventPriority.LOWEST)
+    public static void onProjectileImpact(ProjectileImpactEvent event) {
+        HitResult result = event.getRayTraceResult();
+        if (result.getType() != HitResult.Type.ENTITY)
+            return;
+
+        Entity entity = ((EntityHitResult) result).getEntity();
+        if (!entity.level().isClientSide() && entity instanceof Player) {
+            hitList.put((Player) entity, Pair.of(event.getEntity(), event.getRayTraceResult()));
+        }
+    }
+
+    @SubscribeEvent
+    public static void tickPlayers(PlayerTickEvent.Post event) {
+        Player player = event.getEntity();
+        if (!player.getAbilities().invulnerable) {
+            if (!player.isAlive()) return;
+            AbstractPlayerDamageModel damageModel = CommonUtils.getDamageModel(player);
+            if (damageModel == null) return;
+            if (!player.level().isClientSide() && damageModel instanceof PlayerDamageModel playerDamageModel) {
+                float nearMissStrength = getNearbyProjectileStrength(player);
+                if (nearMissStrength > 0.0F) {
+                    playerDamageModel.registerAdrenalineNearMiss(nearMissStrength);
+                }
+                if (playerDamageModel.isUnconscious()) {
+                    clearAttackTargetsAround(player, 24.0D);
+                }
+            }
+            damageModel.tick(player.level(), player);
+            hitList.remove(player);
+        }
+    }
+
+    @SubscribeEvent
+    public static void onSleepFinished(SleepFinishedTimeEvent event) {
+        if (ModList.get().isLoaded("morpheus")) return;
+        for (Player player : event.getLevel().players()) {
+            if (player.isSleepingLongEnough()) {
+                AbstractPlayerDamageModel damageModel = CommonUtils.getDamageModel(player);
+                if (damageModel == null) return;
+                damageModel.sleepHeal(player);
+            }
+        }
+    }
+
+    @SubscribeEvent
+    public static void onLootTableLoad(LootTableLoadEvent event) {
+        Identifier tableName = event.getName();
+        int bandage, plaster, morphine;
+        NumberProvider bandageMax  = UniformGenerator.between(1, 3);
+        NumberProvider plasterMax  = UniformGenerator.between(1, 5);
+        NumberProvider morphineMax = UniformGenerator.between(1, 2);
+        NumberProvider poolRolls   = ConstantValue.exactly(1.0F);
+        if (tableName.equals(BuiltInLootTables.SPAWN_BONUS_CHEST)) {
+            bandage = 8;
+            plaster = 16;
+            morphine = 4;
+            morphineMax = ConstantValue.exactly(1);
+        } else if (tableName.equals(BuiltInLootTables.STRONGHOLD_CORRIDOR) || tableName.equals(BuiltInLootTables.STRONGHOLD_CROSSING) || tableName.equals(BuiltInLootTables.ABANDONED_MINESHAFT)) {
+            bandage = 20;
+            plaster = 24;
+            morphine = 8;
+            poolRolls = UniformGenerator.between(0, 1);
+        } else if (tableName.equals(BuiltInLootTables.VILLAGE_BUTCHER)) {
+            bandage = 4;
+            plaster = 20;
+            morphine = 2;
+            plasterMax = UniformGenerator.between(3, 8);
+        } else if (tableName.equals(BuiltInLootTables.IGLOO_CHEST)) {
+            bandage = 4;
+            plaster = 8;
+            morphine = 2;
+            poolRolls = UniformGenerator.between(0, 1);
+        } else if (tableName.equals(BuiltInLootTables.SHIPWRECK_SUPPLY)) {
+            bandage = 4;
+            plaster = 8;
+            morphine = 2;
+            bandageMax = UniformGenerator.between(1, 2);
+            plasterMax = UniformGenerator.between(1, 3);
+            morphineMax = ConstantValue.exactly(1);
+            poolRolls = UniformGenerator.between(0, 1);
+        } else {
+            return;
+        }
+        LootPool.Builder builder = LootPool.lootPool().name("firstaid_main").setRolls(poolRolls);
+        builder.add(LootItem.lootTableItem(RegistryObjects.BANDAGE::get)
+                    .apply(SetItemCountFunction.setCount(bandageMax))
+                    .setWeight(bandage)
+                    .setQuality(0));
+        builder.add(LootItem.lootTableItem(RegistryObjects.PLASTER::get)
+                    .apply(SetItemCountFunction.setCount(plasterMax))
+                    .setWeight(plaster)
+                    .setQuality(0));
+        builder.add(LootItem.lootTableItem(RegistryObjects.MORPHINE::get)
+                    .apply(SetItemCountFunction.setCount(morphineMax))
+                    .setWeight(morphine)
+                    .setQuality(0));
+        event.getTable().addPool(builder.build());
+    }
+
+    @SubscribeEvent(priority = EventPriority.LOW)
+    public static void onHeal(LivingHealEvent event) {
+        LivingEntity entity = event.getEntity();
+        if (entity.isDeadOrDying() || !CommonUtils.hasDamageModel(entity))
+            return;
+        event.setCanceled(true);
+        if (entity.level().isClientSide() || !FirstAidConfig.SERVER.allowOtherHealingItems.get())
+            return;
+        float amount = event.getAmount();
+        //Hacky shit to reduce vanilla regen
+        if (Arrays.stream(Thread.currentThread().getStackTrace()).anyMatch(stackTraceElement -> stackTraceElement.getClassName().equals(FoodData.class.getName()))) {
+            if (FirstAidConfig.SERVER.allowNaturalRegeneration.get())
+                amount = amount * (float) (double) FirstAidConfig.SERVER.naturalRegenMultiplier.get();
+        } else {
+            amount = amount * (float) (double) FirstAidConfig.SERVER.otherRegenMultiplier.get();
+        }
+        if (FirstAidConfig.GENERAL.debug.get()) {
+            CommonUtils.debugLogStacktrace("External healing: : " + amount);
+        }
+        HealthDistribution.distributeHealth(amount, (Player) entity, true);
+    }
+
+    @SubscribeEvent(priority = EventPriority.HIGH)
+    public static void onLogin(PlayerEvent.PlayerLoggedInEvent event) {
+        if (!event.getEntity().level().isClientSide()) {
+            FirstAid.LOGGER.debug("Sending damage model to {}", event.getEntity().getName());
+            AbstractPlayerDamageModel damageModel = CommonUtils.getDamageModel(event.getEntity());
+            if (damageModel == null) return;
+            if (damageModel.hasTutorial)
+                CapProvider.tutorialDone.add(event.getEntity().getName().getString());
+            ServerPlayer playerMP = (ServerPlayer) event.getEntity();
+            awardStarterRecipes(playerMP);
+            playerMP.syncData(FirstAidDataAttachments.DAMAGE_MODEL.get());
+            sendOpCommandTip(playerMP);
+        }
+    }
+
+    @SubscribeEvent(priority =  EventPriority.LOW)
+    public static void onLogout(PlayerEvent.PlayerLoggedOutEvent event) {
+        hitList.remove(event.getEntity());
+    }
+
+    @SubscribeEvent
+    public static void onWorldLoad(LevelEvent.Load event) {
+        LevelAccessor world = event.getLevel();
+        if (!world.isClientSide() && world instanceof net.minecraft.server.level.ServerLevel serverLevel) {
+            serverLevel.getGameRules().set(GameRules.NATURAL_HEALTH_REGENERATION, FirstAidConfig.SERVER.allowNaturalRegeneration.get(), serverLevel.getServer());
+        }
+    }
+
+    @SubscribeEvent
+    public static void onDimensionChange(PlayerEvent.PlayerChangedDimensionEvent event) {
+        Player player = event.getEntity();
+        if (!player.level().isClientSide() && player instanceof ServerPlayer) {
+            AbstractPlayerDamageModel damageModel = CommonUtils.getDamageModel(player);
+            if (damageModel == null) return;
+            ((ServerPlayer) player).syncData(FirstAidDataAttachments.DAMAGE_MODEL.get());
+        }
+    }
+
+    @SubscribeEvent(priority = EventPriority.HIGH)
+    public static void onEntityInteract(PlayerInteractEvent.EntityInteract event) {
+        if (event.getLevel().isClientSide() || !(event.getTarget() instanceof Player targetPlayer)) {
+            return;
+        }
+        Player rescuer = event.getEntity();
+        if (isUnconscious(rescuer)) {
+            event.setCanceled(true);
+            return;
+        }
+        if (rescuer == targetPlayer) {
+            return;
+        }
+        AbstractPlayerDamageModel damageModel = CommonUtils.getDamageModel(targetPlayer);
+        if (!(damageModel instanceof PlayerDamageModel playerDamageModel) || !playerDamageModel.canBeRescued()) {
+            return;
+        }
+
+        ItemStack stack = rescuer.getItemInHand(event.getHand());
+        if (!(stack.getItem() instanceof ItemHealing itemHealing)) {
+            return;
+        }
+        AbstractPartHealer healer = itemHealing.createNewHealer(stack);
+        if (healer == null) {
+            return;
+        }
+        stack.shrink(1);
+        if (playerDamageModel.rescueFromCriticalState(targetPlayer, healer)) {
+            rescuer.displayClientMessage(Component.translatable("firstaid.gui.rescue_other", targetPlayer.getDisplayName()).withStyle(net.minecraft.ChatFormatting.GREEN), true);
+            targetPlayer.displayClientMessage(Component.translatable("firstaid.gui.rescue_received", rescuer.getDisplayName()).withStyle(net.minecraft.ChatFormatting.GREEN), true);
+            event.setCancellationResult(InteractionResult.SUCCESS);
+            event.setCanceled(true);
+        }
+    }
+
+    @SubscribeEvent
+    public static void onItemUse(PlayerInteractEvent.RightClickItem event) {
+        cancelIfUnconscious(event);
+    }
+
+    @SubscribeEvent
+    public static void onBlockInteract(PlayerInteractEvent.RightClickBlock event) {
+        cancelIfUnconscious(event);
+    }
+
+    @SubscribeEvent
+    public static void onBlockAttack(PlayerInteractEvent.LeftClickBlock event) {
+        cancelIfUnconscious(event);
+    }
+
+    @SubscribeEvent
+    public static void onEntityInteractSpecific(PlayerInteractEvent.EntityInteractSpecific event) {
+        cancelIfUnconscious(event);
+    }
+
+    @SubscribeEvent
+    public static void onAttackEntity(AttackEntityEvent event) {
+        if (isUnconscious(event.getEntity())) {
+            event.setCanceled(true);
+        }
+    }
+
+    @SubscribeEvent
+    public static void adjustHitboxSize(EntityEvent.Size event) {
+        Entity entity = event.getEntity();
+        if (entity instanceof Player player && !entity.isPassenger() && isUnconscious(player, false)) {
+            event.setNewSize(PLAYER_UNCONSCIOUS_DIMENSIONS);
+        }
+    }
+
+    @SubscribeEvent
+    public static void onSetAttackTarget(LivingChangeTargetEvent event) {
+        LivingEntity newTarget = event.getNewAboutToBeSetTarget();
+        if (newTarget instanceof Player player && isUnconscious(player)) {
+            event.setNewAboutToBeSetTarget(null);
+        }
+    }
+
+    @SubscribeEvent
+    public static void tagsUpdated(TagsUpdatedEvent event) {
+        if (event.shouldUpdateStaticData()) {
+            FirstAidRegistryLookups.init(event.getLookupProvider(), event.getUpdateCause() == TagsUpdatedEvent.UpdateCause.CLIENT_PACKET_RECEIVED);
+        }
+    }
+
+    @SubscribeEvent
+    public static void onServerStop(ServerStoppedEvent event) {
+        FirstAid.LOGGER.debug("Cleaning up");
+        FirstAid.dynamicPainEnabled = true;
+        CapProvider.tutorialDone.clear();
+        EventHandler.hitList.clear();
+        FirstAidRegistryLookups.reset();
+    }
+
+    @SubscribeEvent
+    public static void registerCommands(RegisterCommandsEvent event) {
+        DebugDamageCommand.register(event.getDispatcher());
+        FirstAidCommand.register(event.getDispatcher());
+    }
+
+    @SubscribeEvent(priority = EventPriority.LOW)
+    public static void onPlayerRespawn(PlayerEvent.PlayerRespawnEvent event) {
+        Player player = event.getEntity();
+        if (!event.isEndConquered() && !player.level().isClientSide() && player instanceof ServerPlayer) {
+            AbstractPlayerDamageModel damageModel = CommonUtils.getDamageModel(player);
+            if (damageModel == null) return;
+            damageModel.runScaleLogic(player);
+            damageModel.forEach(damageablePart -> damageablePart.heal(damageablePart.getMaxHealth(), player, false));
+            if (damageModel instanceof PlayerDamageModel playerDamageModel) {
+                playerDamageModel.clearStatusEffects();
+            }
+            damageModel.scheduleResync();
+        }
+    }
+
+    private static float getNearbyProjectileStrength(Player player) {
+        AABB scanBox = player.getBoundingBox().inflate(3.25D);
+        AABB playerBox = player.getBoundingBox().inflate(0.12D);
+        Vec3 eyePosition = player.getEyePosition();
+        Vec3 torsoPosition = player.position().add(0.0D, player.getBbHeight() * 0.6D, 0.0D);
+        float strongest = 0.0F;
+        List<Projectile> projectiles = player.level().getEntitiesOfClass(Projectile.class, scanBox, projectile -> {
+            if (!projectile.isAlive() || projectile.getOwner() == player) {
+                return false;
+            }
+            if (projectile instanceof AbstractThrownPotion) {
+                return false;
+            }
+            return projectile.getDeltaMovement().lengthSqr() >= 0.02D;
+        });
+        for (Projectile projectile : projectiles) {
+            Vec3 currentPosition = projectile.position();
+            Vec3 previousPosition = currentPosition.subtract(projectile.getDeltaMovement());
+            Vec3 endPosition = currentPosition.add(projectile.getDeltaMovement());
+            if (playerBox.intersects(projectile.getBoundingBox()) || playerBox.clip(previousPosition, endPosition).isPresent()) {
+                continue;
+            }
+            strongest = Math.max(strongest, getNearMissStrength(player, projectile, previousPosition, endPosition, eyePosition));
+            strongest = Math.max(strongest, getNearMissStrength(player, projectile, previousPosition, endPosition, torsoPosition));
+        }
+        return strongest;
+    }
+
+    private static float getNearMissStrength(Player player, Projectile projectile, Vec3 start, Vec3 end, Vec3 target) {
+        ClosestPointResult closestPointResult = closestPointOnSegment(start, end, target);
+        if (closestPointResult.progress <= 0.0D || closestPointResult.progress >= 1.0D) {
+            return 0.0F;
+        }
+        double distance = closestPointResult.point.distanceTo(target);
+        if (distance > 1.85D) {
+            return 0.0F;
+        }
+        BlockHitResult hitResult = player.level().clip(new ClipContext(closestPointResult.point, target, ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, player));
+        if (hitResult.getType() != HitResult.Type.MISS) {
+            return 0.0F;
+        }
+        double speed = projectile.getDeltaMovement().length();
+        float speedFactor = Mth.clamp((float) ((speed - 0.18D) / 0.65D), 0.0F, 1.0F);
+        float distanceFactor = Mth.clamp(1.32F - (float) (distance / 1.85D), 0.0F, 1.0F);
+        return Mth.clamp(distanceFactor * (0.82F + 0.58F * speedFactor), 0.0F, 1.45F);
+    }
+
+    private static ClosestPointResult closestPointOnSegment(Vec3 start, Vec3 end, Vec3 target) {
+        Vec3 segment = end.subtract(start);
+        double lengthSqr = segment.lengthSqr();
+        if (lengthSqr < 1.0E-7D) {
+            return new ClosestPointResult(start, 0.0D);
+        }
+        double progress = Mth.clamp(target.subtract(start).dot(segment) / lengthSqr, 0.0D, 1.0D);
+        return new ClosestPointResult(start.add(segment.scale(progress)), progress);
+    }
+
+    private static <T extends PlayerInteractEvent & ICancellableEvent> void cancelIfUnconscious(T event) {
+        if (isUnconscious(event.getEntity())) {
+            event.setCanceled(true);
+        }
+    }
+
+    private static boolean isUnconscious(Player player) {
+        return isUnconscious(player, true);
+    }
+
+    private static boolean isUnconscious(Player player, boolean allowCreate) {
+        AbstractPlayerDamageModel damageModel = allowCreate
+                ? CommonUtils.getDamageModel(player)
+                : CommonUtils.getExistingDamageModel(player);
+        return damageModel instanceof PlayerDamageModel playerDamageModel && playerDamageModel.isUnconscious();
+    }
+
+    private static void clearAttackTargetsAround(LivingEntity victim, double range) {
+        LevelAccessor level = victim.level();
+        if (!(level instanceof net.minecraft.world.level.Level gameLevel)) {
+            return;
+        }
+        List<Mob> mobs = gameLevel.getEntitiesOfClass(Mob.class, victim.getBoundingBox().inflate(range));
+        for (Mob mob : mobs) {
+            if (mob.getTarget() == victim) {
+                mob.setTarget(null);
+                Brain<?> brain = mob.getBrain();
+                eraseMemory(brain, MemoryModuleType.ANGRY_AT);
+                eraseMemory(brain, MemoryModuleType.ATTACK_TARGET);
+            }
+        }
+    }
+
+    private static void eraseMemory(Brain<?> brain, MemoryModuleType<?> type) {
+        if (brain.hasMemoryValue(type)) {
+            brain.eraseMemory(type);
+        }
+    }
+
+    private static void sendOpCommandTip(ServerPlayer player) {
+        if (!player.permissions().hasPermission(Permissions.COMMANDS_GAMEMASTER)) {
+            return;
+        }
+        Component message = Component.literal("[FirstAid] ").withStyle(ChatFormatting.GOLD, ChatFormatting.BOLD)
+                .append(Component.literal("OP Commands: ").withStyle(ChatFormatting.YELLOW))
+                .append(Component.literal("/firstaid ").withStyle(ChatFormatting.AQUA))
+                .append(Component.literal("| ").withStyle(ChatFormatting.DARK_GRAY))
+                .append(Component.literal("/damagePart").withStyle(ChatFormatting.AQUA));
+        player.displayClientMessage(message, false);
+    }
+
+    private record ClosestPointResult(Vec3 point, double progress) {
+    }
+}
+
+
+

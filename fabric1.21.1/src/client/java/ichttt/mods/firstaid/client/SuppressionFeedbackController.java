@@ -1,0 +1,352 @@
+/*
+ * FirstAid
+ * Copyright (C) 2017-2024
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+package ichttt.mods.firstaid.client;
+
+import ichttt.mods.firstaid.FirstAid;
+import ichttt.mods.firstaid.FirstAidConfig;
+import ichttt.mods.firstaid.api.damagesystem.AbstractPlayerDamageModel;
+import ichttt.mods.firstaid.common.RegistryObjects;
+import ichttt.mods.firstaid.common.damagesystem.PlayerDamageModel;
+import ichttt.mods.firstaid.common.util.CommonUtils;
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.resources.sounds.SimpleSoundInstance;
+import net.minecraft.client.resources.sounds.Sound;
+import net.minecraft.client.resources.sounds.SoundInstance;
+import net.minecraft.client.sounds.SoundManager;
+import net.minecraft.client.sounds.WeighedSoundEvents;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.resources.ResourceLocation;
+import net.minecraft.sounds.SoundEvent;
+import net.minecraft.sounds.SoundSource;
+import net.minecraft.util.Mth;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.level.Level;
+
+import javax.annotation.Nullable;
+import java.util.Set;
+
+public final class SuppressionFeedbackController {
+    private static final ResourceLocation TINNITUS_RING_SOUND = ResourceLocation.withDefaultNamespace("block.bell.use");
+    private static final ResourceLocation TINNITUS_LAYER_SOUND = ResourceLocation.withDefaultNamespace("block.conduit.ambient.short");
+    private static final ResourceLocation MUFFLE_PUNCH_SOUND = ResourceLocation.withDefaultNamespace("entity.warden.heartbeat");
+    private static final Set<ResourceLocation> INTERNAL_SOUNDS = Set.of(TINNITUS_RING_SOUND, TINNITUS_LAYER_SOUND, MUFFLE_PUNCH_SOUND);
+    private static final float PAIN_FOV_MAX_REDUCTION = 12.0F;
+    private static final float PAIN_FOV_GAIN = 0.18F;
+    private static final float PAIN_FOV_DECAY = 0.04F;
+    private static final float SUPPRESSION_FOV_MIN = 30.0F;
+    private static final float LOW_SUPPRESSION_MULTIPLIER = 0.4F;
+
+    private float suppressionIntensity;
+    private int holdTicks;
+    private float audioMuffleStrength;
+    private float tinnitusStrength;
+    private float shakeStrength;
+    private float sustainedFovCompression;
+    private float painFovCompression;
+    private float rollImpulse;
+    private float yawImpulse;
+    private float pitchImpulse;
+    private float fovImpulse;
+    private long soundCooldownUntilGameTime;
+    private @Nullable Level trackedLevel;
+
+    public void tick(Minecraft client) {
+        Player player = client.player;
+        Level level = client.level;
+        if (player == null || level == null || !player.isAlive() || !FirstAid.isSynced) {
+            clear(level);
+            return;
+        }
+        if (trackedLevel != level) {
+            clear(level);
+            trackedLevel = level;
+        }
+
+        AbstractPlayerDamageModel damageModel = CommonUtils.getDamageModel(player);
+        PlayerDamageModel playerDamageModel = damageModel instanceof PlayerDamageModel model ? model : null;
+        float suppressionScale = FirstAid.lowSuppressionEnabled ? LOW_SUPPRESSION_MULTIPLIER : 1.0F;
+        suppressionIntensity = (playerDamageModel == null ? 0.0F : playerDamageModel.getSuppressionIntensity()) * suppressionScale;
+        holdTicks = playerDamageModel == null ? 0 : playerDamageModel.getSuppressionHoldTicks();
+        boolean painSuppressed = player.hasEffect(RegistryObjects.MORPHINE_EFFECT)
+                || player.hasEffect(RegistryObjects.PAINKILLER_EFFECT);
+        float targetPainFov = painSuppressed || playerDamageModel == null
+                ? 0.0F
+                : playerDamageModel.getPainVisualStrength() * PAIN_FOV_MAX_REDUCTION;
+
+        boolean holding = holdTicks > 0;
+        float targetMuffle = holding
+                ? Math.max(0.88F, suppressionIntensity * 1.12F)
+                : suppressionIntensity * 0.98F;
+        float targetTinnitus = holding
+                ? Math.max(0.48F, suppressionIntensity * 0.64F)
+                : suppressionIntensity * 0.42F;
+        float targetShake = holding
+                ? 0.38F + suppressionIntensity * 0.55F
+                : suppressionIntensity * 0.34F;
+        float targetFovCompression = holding
+                ? 4.4F + suppressionIntensity * 7.0F
+                : suppressionIntensity * 3.6F;
+
+        audioMuffleStrength = approach(audioMuffleStrength, targetMuffle, targetMuffle > audioMuffleStrength ? 0.22F : 0.025F);
+        tinnitusStrength = approach(tinnitusStrength, targetTinnitus, targetTinnitus > tinnitusStrength ? 0.12F : 0.02F);
+        shakeStrength = approach(shakeStrength, targetShake, targetShake > shakeStrength ? 0.10F : 0.015F);
+        sustainedFovCompression = approach(sustainedFovCompression, targetFovCompression, targetFovCompression > sustainedFovCompression ? 0.16F : 0.03F);
+        painFovCompression = approach(painFovCompression, targetPainFov, targetPainFov > painFovCompression ? PAIN_FOV_GAIN : PAIN_FOV_DECAY);
+
+        rollImpulse *= holding ? 0.95F : 0.88F;
+        yawImpulse *= 0.85F;
+        pitchImpulse *= 0.85F;
+        fovImpulse *= holding ? 0.93F : 0.83F;
+    }
+
+    public void clear() {
+        clear(null);
+    }
+
+    public float getSuppressionIntensity() {
+        return suppressionIntensity;
+    }
+
+    public int getHoldTicks() {
+        return holdTicks;
+    }
+
+    public float getVisualStrength() {
+        if (suppressionIntensity <= 0.0F && shakeStrength <= 0.0F) {
+            return 0.0F;
+        }
+        return Mth.clamp(Math.max(suppressionIntensity, shakeStrength * 0.20F), 0.0F, 1.0F);
+    }
+
+    public float getAudioMuffleStrength() {
+        return audioMuffleStrength;
+    }
+
+    public float getTinnitusStrength() {
+        return tinnitusStrength;
+    }
+
+    public float getShakeStrength() {
+        return shakeStrength;
+    }
+
+    public float getSustainedFovCompression() {
+        return sustainedFovCompression;
+    }
+
+    public void onNearMiss(Player player, float severity, float lateralSign, float verticalSign) {
+        shakeStrength = Math.max(shakeStrength, 0.34F + severity * 0.34F);
+        rollImpulse += lateralSign * (1.2F + severity * 2.0F);
+        yawImpulse += lateralSign * (0.35F + severity * 0.75F);
+        pitchImpulse += verticalSign * (0.18F + severity * 0.42F);
+        fovImpulse += 2.0F + severity * 4.2F;
+
+        if (!FirstAidConfig.CLIENT.enableSounds.get()) {
+            return;
+        }
+
+        Level level = player.level();
+        if (level.getGameTime() >= soundCooldownUntilGameTime) {
+            soundCooldownUntilGameTime = level.getGameTime() + Mth.ceil(8 + (1.0F - severity) * 12.0F);
+            playSuppressionSounds(severity);
+        }
+    }
+
+    public CameraAngles applyCameraAngles(@Nullable Entity entity, float partialTick, float yaw, float pitch) {
+        if (suppressionIntensity <= 0.01F && shakeStrength <= 0.01F && Math.abs(rollImpulse) <= 0.01F
+                && Math.abs(yawImpulse) <= 0.01F && Math.abs(pitchImpulse) <= 0.01F) {
+            return new CameraAngles(yaw, pitch, 0.0F);
+        }
+        CameraCarrier cameraCarrier = new CameraCarrier(partialTick, entity, suppressionIntensity, shakeStrength);
+        float oscillation = cameraCarrier.oscillation();
+        float newYaw = yaw + yawImpulse + oscillation * 0.20F;
+        float newPitch = pitch + pitchImpulse + oscillation * 0.14F;
+        float newRoll = rollImpulse + oscillation * 0.80F + suppressionIntensity * 0.55F + shakeStrength * 0.18F;
+        return new CameraAngles(newYaw, newPitch, newRoll);
+    }
+
+    public float applyFov(float baseFov) {
+        if (suppressionIntensity <= 0.01F && fovImpulse <= 0.01F && sustainedFovCompression <= 0.01F && painFovCompression <= 0.01F) {
+            return baseFov;
+        }
+        float suppressionTunnelVision = sustainedFovCompression + fovImpulse;
+        float tunnelVision = suppressionTunnelVision + painFovCompression;
+        float minFov = suppressionTunnelVision > 0.01F ? SUPPRESSION_FOV_MIN : 44.0F;
+        return Math.max(minFov, baseFov - tunnelVision);
+    }
+
+    public @Nullable SoundInstance maybeMuffle(@Nullable SoundInstance original) {
+        if (!FirstAidConfig.CLIENT.enableSounds.get()) {
+            return original;
+        }
+        if (original == null || audioMuffleStrength <= 0.01F || original instanceof MuffledSoundInstance) {
+            return original;
+        }
+        ResourceLocation soundId = original.getLocation();
+        if (INTERNAL_SOUNDS.contains(soundId) || original.getSource() == SoundSource.MASTER) {
+            return original;
+        }
+        float volumeScale = 1.0F - audioMuffleStrength * 0.55F;
+        float pitchScale = 1.0F - audioMuffleStrength * 0.32F;
+        return new MuffledSoundInstance(original, volumeScale, pitchScale);
+    }
+
+    private void playSuppressionSounds(float severity) {
+        Minecraft client = Minecraft.getInstance();
+        SoundManager soundManager = client.getSoundManager();
+        SoundEvent ring = BuiltInRegistries.SOUND_EVENT.get(TINNITUS_RING_SOUND);
+        if (ring != null) {
+            soundManager.play(SimpleSoundInstance.forUI(ring, 0.16F + severity * 0.24F, 1.60F + severity * 0.26F));
+        }
+        SoundEvent layer = BuiltInRegistries.SOUND_EVENT.get(TINNITUS_LAYER_SOUND);
+        if (layer != null) {
+            soundManager.play(SimpleSoundInstance.forUI(layer, 0.12F + severity * 0.18F, 1.22F + severity * 0.18F));
+        }
+        SoundEvent punch = BuiltInRegistries.SOUND_EVENT.get(MUFFLE_PUNCH_SOUND);
+        if (punch != null) {
+            soundManager.play(SimpleSoundInstance.forUI(punch, 0.18F + severity * 0.18F, 0.65F + severity * 0.14F));
+        }
+    }
+
+    private void clear(@Nullable Level level) {
+        trackedLevel = level;
+        suppressionIntensity = 0.0F;
+        holdTicks = 0;
+        audioMuffleStrength = 0.0F;
+        tinnitusStrength = 0.0F;
+        shakeStrength = 0.0F;
+        sustainedFovCompression = 0.0F;
+        painFovCompression = 0.0F;
+        rollImpulse = 0.0F;
+        yawImpulse = 0.0F;
+        pitchImpulse = 0.0F;
+        fovImpulse = 0.0F;
+        soundCooldownUntilGameTime = 0L;
+    }
+
+    private static float approach(float current, float target, float delta) {
+        if (current < target) {
+            return Math.min(target, current + delta);
+        }
+        return Math.max(target, current - delta);
+    }
+
+    private record CameraCarrier(double partialTick, @Nullable Entity entity, float suppressionIntensity, float shakeStrength) {
+        private float oscillation() {
+            if (entity == null) {
+                return 0.0F;
+            }
+            float time = (float) (entity.tickCount + partialTick);
+            float low = (float) Math.sin(time * 0.65F);
+            float high = (float) Math.sin(time * 2.75F);
+            return (low * 0.35F + high * 0.65F) * (shakeStrength * 0.65F + suppressionIntensity * 0.18F);
+        }
+    }
+
+    public record CameraAngles(float yaw, float pitch, float roll) {
+    }
+
+    private static final class MuffledSoundInstance implements SoundInstance {
+        private final SoundInstance delegate;
+        private final float volumeScale;
+        private final float pitchScale;
+
+        private MuffledSoundInstance(SoundInstance delegate, float volumeScale, float pitchScale) {
+            this.delegate = delegate;
+            this.volumeScale = volumeScale;
+            this.pitchScale = pitchScale;
+        }
+
+        @Override
+        public ResourceLocation getLocation() {
+            return delegate.getLocation();
+        }
+
+        @Override
+        public WeighedSoundEvents resolve(SoundManager soundManager) {
+            return delegate.resolve(soundManager);
+        }
+
+        @Override
+        public Sound getSound() {
+            return delegate.getSound();
+        }
+
+        @Override
+        public SoundSource getSource() {
+            return delegate.getSource();
+        }
+
+        @Override
+        public boolean isLooping() {
+            return delegate.isLooping();
+        }
+
+        @Override
+        public boolean isRelative() {
+            return delegate.isRelative();
+        }
+
+        @Override
+        public int getDelay() {
+            return delegate.getDelay();
+        }
+
+        @Override
+        public float getVolume() {
+            return delegate.getVolume() * volumeScale;
+        }
+
+        @Override
+        public float getPitch() {
+            return delegate.getPitch() * pitchScale;
+        }
+
+        @Override
+        public double getX() {
+            return delegate.getX();
+        }
+
+        @Override
+        public double getY() {
+            return delegate.getY();
+        }
+
+        @Override
+        public double getZ() {
+            return delegate.getZ();
+        }
+
+        @Override
+        public Attenuation getAttenuation() {
+            return delegate.getAttenuation();
+        }
+
+        @Override
+        public boolean canStartSilent() {
+            return delegate.canStartSilent();
+        }
+
+        @Override
+        public boolean canPlaySound() {
+            return delegate.canPlaySound();
+        }
+    }
+}
