@@ -1,19 +1,12 @@
 /*
  * FirstAid
  * Copyright (C) 2017-2024
+ * Modified 2026 by PepperMarioYT
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 package ichttt.mods.firstaid.common.util;
@@ -138,18 +131,13 @@ public class CommonUtils {
         }
     }
 
-    /**
-     * Returns the damage model if present.
-     * If absent, an exception is thrown in debug mode, otherwise null is returned.
-     */
     @Nullable
     public static AbstractPlayerDamageModel getDamageModel(Player player) {
+        if (player == null) return null; // Added safety check
         LazyOptional<AbstractPlayerDamageModel> optionalDamageModel = getOptionalDamageModel(player);
         try {
-            return optionalDamageModel.orElseThrow(() -> new IllegalArgumentException("Player " + player.getName().getContents() + " is missing a damage model!"));
+            return optionalDamageModel.orElseThrow(() -> new IllegalArgumentException("Player " + player.getName().getString() + " is missing a damage model!"));
         } catch (IllegalArgumentException e) {
-            // This is a band-aid solution, as bug reports about this keep coming up and these are really hard to debug bugs
-            // I don't have the time to correctly debug this, so it seems like there is no other way right now
             if (FirstAidConfig.GENERAL.debug.get()) {
                 FirstAid.LOGGER.fatal("Mandatory damage model missing!", e);
                 throw e;
@@ -162,11 +150,16 @@ public class CommonUtils {
 
     @Nonnull
     public static LazyOptional<AbstractPlayerDamageModel> getOptionalDamageModel(Player player) {
+        // PATCH: Added null check to prevent NPE during keypress events
+        if (player == null) {
+            return LazyOptional.empty();
+        }
         return LazyOptional.of(() -> player.getData(FirstAidDataAttachments.DAMAGE_MODEL.get()));
     }
 
     @Nullable
     public static AbstractPlayerDamageModel getExistingDamageModel(Player player) {
+        if (player == null) return null;
         return player.getExistingDataOrNull(FirstAidDataAttachments.DAMAGE_MODEL.get());
     }
 
@@ -188,4 +181,3 @@ public class CommonUtils {
         context.setPacketHandled(true);
     }
 }
-
