@@ -1,19 +1,12 @@
 /*
  * FirstAid
  * Copyright (C) 2017-2024
+ * Modified 2026 by PepperMarioYT
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
 package ichttt.mods.firstaid.common.util;
@@ -68,6 +61,7 @@ public class CommonUtils {
     }
 
     public static void killPlayer(@Nonnull AbstractPlayerDamageModel damageModel, @Nonnull Player player, @Nullable DamageSource source) {
+        if (player == null) return;
         if (player.level().isClientSide()) {
             try {
                 throw new RuntimeException("Tried to kill the player on the client!");
@@ -84,6 +78,7 @@ public class CommonUtils {
     }
 
     public static void killPlayerDirectly(@Nonnull Player player, @Nullable DamageSource source) {
+        if (player == null) return;
         DamageSource resolvedSource = source != null ? source : player.damageSources().generic();
         player.setHealth(0.0F);
         player.die(resolvedSource);
@@ -101,12 +96,14 @@ public class CommonUtils {
     }
 
     public static void healPlayerByPercentage(double percentage, AbstractPlayerDamageModel damageModel, Player player) {
+        if (player == null) return;
         Objects.requireNonNull(damageModel);
         int healValue = Ints.checkedCast(Math.round(damageModel.getCurrentMaxHealth() * percentage));
         HealthDistribution.manageHealth(healValue, damageModel, player, true, false);
     }
 
     public static void healAllPartsByPercentage(double percentage, AbstractPlayerDamageModel damageModel, Player player) {
+        if (player == null) return;
         Objects.requireNonNull(damageModel);
         boolean applyDebuff = !player.level().isClientSide();
         for (AbstractDamageablePart part : damageModel) {
@@ -140,9 +137,13 @@ public class CommonUtils {
      */
     @Nullable
     public static AbstractPlayerDamageModel getDamageModel(Player player) {
+        // PATCH: Prevent crash if player is null during keypress
+        if (player == null) return null;
+
         if (!(player instanceof FirstAidDamageModelHolder holder)) {
             if (FirstAidConfig.GENERAL.debug.get()) {
-                IllegalArgumentException e = new IllegalArgumentException("Player " + player.getName().getContents() + " is missing a damage model!");
+                // PATCH: Changed .getContents() to .getString() for 1.21.1 compatibility
+                IllegalArgumentException e = new IllegalArgumentException("Player " + player.getName().getString() + " is missing a damage model!");
                 FirstAid.LOGGER.fatal("Mandatory damage model missing!", e);
                 throw e;
             }
@@ -159,6 +160,9 @@ public class CommonUtils {
 
     @Nullable
     public static AbstractPlayerDamageModel getExistingDamageModel(Player player) {
+        // PATCH: Added null check
+        if (player == null) return null;
+
         if (!(player instanceof FirstAidDamageModelHolder holder)) {
             return null;
         }
@@ -169,4 +173,3 @@ public class CommonUtils {
         return entity instanceof Player;
     }
 }
-
