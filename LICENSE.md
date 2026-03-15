@@ -1,6 +1,27 @@
                     GNU GENERAL PUBLIC LICENSE
                        Version 3, 29 June 2007
 
+### 📜 License Summary: First Aid New (Patched)
+This mod is a fork of **First Aid New** by maoruiq. In compliance with the **GNU General Public License v3.0**, this version is also licensed under the GPLv3.
+
+
+| Feature | Allowed? | Requirement |
+| :--- | :---: | :--- |
+| **Use in Modpacks** | ✅ | No permission needed! |
+| **Modify & Fork** | ✅ | Must keep GPLv3 and credit original authors. |
+| **Redistribute** | ✅ | You must provide/link the source code. |
+| **Commercial Use** | ✅ | Allowed for monetized servers/videos. |
+| **Private Use** | ✅ | Use and edit for yourself or friends. |
+| **Close the Source** | ❌ | You cannot make this a "private" or closed mod. |
+| **Change License** | ❌ | All derivative works must remain under GPLv3. |
+
+---
+
+### 🛠️ Notice of Modification
+* **Modified By:** PepperMarioYT (2026)
+* **Changes:** Patched `NullPointerException` in `CommonUtils.java` affecting NeoForge 1.21.1 keypress events.
+
+
  Copyright (C) 2007 Free Software Foundation, Inc. <https://fsf.org/>
  Everyone is permitted to copy and distribute verbatim copies
  of this license document, but changing it is not allowed.
